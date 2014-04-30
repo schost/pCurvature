@@ -1,0 +1,712 @@
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+/* Misc.                                                    */
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+
+/*----------------------------------------------------------*/
+/* computes 1/x, where x is a power series                  */
+/*----------------------------------------------------------*/
+function fast_inverse_series(x)
+    assert Type(x) eq RngSerPowElt or Type(x) eq RngSerLaurElt;
+    assert Coefficient(x,0) ne 0;
+    
+    if (Degree(x) lt 200) then
+	return 1/x;
+    end if;
+    
+  
+    US:=Parent(x);
+    Prec:=Precision(US);
+    PrecLoc:=1;
+    u:=US.1;
+    v:=US.1;
+    R:=US!1/Coefficient(x,0)+O(u);
+    
+    repeat
+	R:=(US!Coefficients(R)+O(u^2));
+	R:=2*R-(x+O(u^2))*R^2;
+	u:=u^2+O(v^Prec);
+	PrecLoc*:=2;
+    until PrecLoc ge Prec;
+
+  return R;
+end function;
+
+/*----------------------------------------------------------*/
+/*  computes 1/x at precision d, where x is a polynomial    */
+/*----------------------------------------------------------*/
+function fast_inverse(x, d)
+    assert Type(x) eq RngUPolElt;
+
+    U:=LaurentSeriesRing(BaseRing(Parent(x)), d);
+    return Parent(x)!Coefficients(fast_inverse_series(U!Coefficients(x)));
+end function;
+
+/*----------------------------------------------------------*/
+/* shifting function                                        */
+/* shift(n)(f) = f(x+n)                                     */
+/*----------------------------------------------------------*/
+function shift(n)
+    return func<F | Evaluate(F, Parent(F).1+n)>;
+end function;
+
+/*----------------------------------------------------------*/
+/* evaluation function                                      */
+/* ev(i)(f) = f(i)                                          */
+/*----------------------------------------------------------*/
+function ev(n)
+    return func<F | Evaluate(F, n)>;
+end function;
+
+/*----------------------------------------------------------*/
+/* applies f to all entries of a matrix or a sequence       */
+/*----------------------------------------------------------*/
+function map(M, f)
+    if Type(M) eq ModMatRngElt or Type(M) eq AlgMatElt then
+	m:=NumberOfRows(M);
+	n:=NumberOfColumns(M);
+	return Matrix(m, n, [[f(M[i][j]) : j in [1..n]] : i in [1..m]]);
+    end if;
+    if Type(M) eq SeqEnum then
+	return [f(x) : x in M];
+    end if;
+    error "map: not implemented";
+end function;
+
+
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+/* Subproduct tree, evaluation, interpolation               */
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+
+/*----------------------------------------------------------*/
+/* subproduct tree associated to points pts                 */
+/* degree-one polynomials (leaves) are the first row        */
+/* root is the last row                                     */
+/*----------------------------------------------------------*/
+function subproduct_tree(pts)
+    U<x>:=PolynomialRing(Universe(pts));
+    T:=[];
+    T[1]:=[x-a : a in pts];
+    i:=1;
+    while #T[i] ge 2 do
+	nb:=#T[i];
+	nb2:=nb div 2;
+	L:=[T[i][2*j-1]*T[i][2*j] : j in [1..nb2]];
+	if IsOdd(nb) then
+	    L:=L cat [T[i][nb]];
+	end if;
+	T[i+1]:=L;
+	i:=i+1;
+    end while;
+    return T;
+end function;
+
+/*----------------------------------------------------------*/
+/* evaluates P at the points pts, given their tree          */
+/*----------------------------------------------------------*/
+function fast_evaluate_doit(P, tree, pts)
+    s:=#tree;
+    L:=[P mod tree[s][1]];
+    for i in [s-1..1 by -1] do
+	nb:=#tree[i];
+	nb2:=nb div 2;
+	if IsOdd(nb) then
+	    tmp:=L[nb2+1];
+	end if;
+
+	L:=&cat [[L[j] mod tree[i][2*j-1], L[j] mod tree[i][2*j]] : j in [1..nb2]];
+	if IsOdd(nb) then
+	    L:=L cat [tmp];
+	end if;
+    end for;
+    return [Universe(pts)!x : x in L];
+end function;
+
+/*----------------------------------------------------------*/
+/* top-level evaluation function                            */
+/*----------------------------------------------------------*/
+function fast_evaluate(P, pts)
+    return fast_evaluate_doit(P, subproduct_tree(pts), pts);
+end function;
+
+/*----------------------------------------------------------*/
+/* returns sum v[i] prod(x-x[j], j ne i)                    */
+/* tree is the subproduct_tree associated to points x       */
+/*----------------------------------------------------------*/
+function fast_linear_combination(v, tree)
+    U<x>:=PolynomialRing(Universe(v));
+    s:=#tree;
+    L:=[U!vv : vv in v];
+    for i in [1..s-1] do
+	nb:=#tree[i];
+	nb2:=nb div 2;
+	if IsOdd(nb) then
+	    tmp:=L[nb];
+	end if;
+
+	L:=[L[2*j]*tree[i][2*j-1]+L[2*j-1]*tree[i][2*j] : j in [1..nb2]];
+	if IsOdd(nb) then
+	    L:=L cat [tmp];
+	end if;
+    end for;
+    return L[1];
+end function;
+
+/*----------------------------------------------------------*/
+/* top-level interpolation function                         */
+/*----------------------------------------------------------*/
+function fast_interpolation(v, pts)
+    tree:=subproduct_tree(pts);
+    M:=tree[#tree][1];
+    dM:=Derivative(M);
+    den:=fast_evaluate_doit(dM, tree, pts);
+    return fast_linear_combination([v[i]/den[i] : i in [1..#v]], tree);
+end function;
+
+/*----------------------------------------------------------*/
+/* given values v, returns the coefficients of the          */
+/* interpolating polynomial f at 0,1,.. in the Newton basis */
+/*----------------------------------------------------------*/
+function newton_interpolation(v)
+    k:=Universe(v);
+    U<x>:=PolynomialRing(k);
+    n:=#v;
+    fact:=k!1;
+    w:=[k|];
+    s:=[k|];
+    for i in [1..n] do
+	w[i]:=v[i]/fact;
+	s[i]:=1/fact;
+	fact:=fact*i;
+    end for;
+
+    W:=U!w;
+    S:=U!s;
+    iS:=fast_inverse(S, n);
+    F:=W*iS;
+    return [Coefficient(F, i) : i in [0..n-1]];
+end function;
+
+/*----------------------------------------------------------*/
+/* given coefficients of a polynomial f in the Newton basis */
+/* at 0,1,.., returns its values                            */
+/*----------------------------------------------------------*/
+function newton_evaluation(f)
+    k:=Universe(f);
+    U<x>:=PolynomialRing(k);
+    n:=#f;
+    fact:=k!1;
+    w:=[k|];
+    s:=[k|];
+    for i in [1..n] do
+	s[i]:=1/fact;
+	fact:=fact*i;
+    end for;
+    F:=U!f;
+    S:=U!s;
+    W:=F*S;
+
+    v:=[k|];
+    fact:=k!1;
+    for i in [1..n] do
+	v[i]:=Coefficient(W, i-1)*fact;
+	fact:=fact*i;
+    end for;
+
+    return v;
+end function;
+
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+/* matrix factorial                                         */
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+
+/*----------------------------------------------------------*/
+/* given src of the form [P(r)...P(r+ds)], for some P of    */
+/* degree d and constants r,s, returns [P(r)...P(r+(k-1)s)] */
+/* denom = (1-x)^(d+1), i_denom = 1/denom mod x^k           */
+/* (denom = denominator of the generating series            */
+/*----------------------------------------------------------*/
+function next_values(src, denom, i_denom, d, k)
+    U<x>:=PolynomialRing(Universe(src));
+    tmp:=(U!src*denom mod x^(d+1))*i_denom mod x^k;
+    return [Coefficient(tmp, i) : i in [0..k-1]];
+end function;
+
+/*----------------------------------------------------------*/
+/* given a polynomial matrix M, returns the matrix          */
+/* M(r+(4^ell*d+2^ell-1)s) .. M(r+s) M(r)                   */
+/* with d = degree(M)                                       */
+/* uses the baby steps / giant steps algorithm from BGS     */
+/*----------------------------------------------------------*/
+function matrix_factorial_BGS(M_in, r, s, ell)
+    U<y>:=PolynomialRing(Parent(r));
+    M:=map(M_in, ev(y));
+    d:=Max([Degree(x) : x in Eltseq(M)]);
+
+    U<x>:=BaseRing(Parent(M));
+    A:=Parent(r);
+    sz:=NumberOfRows(M);
+    len:=2^(ell+1)*d+2;
+    val:=[map(M, ev(r+s*i)) : i in [0..d]];
+    val:=val cat [Universe(val)!0 : i in [1..len-d-1]];
+
+    denom_init:=(1-x)^(d+2);
+
+    for idx in [0..ell-1] do
+        a:=d*2^idx;
+        //      idx, a;
+        //      denom:=(1-x)^(a+1);
+        denom_init:=denom_init div (1-x);
+        //      denom eq denom_init;
+        i_denom:=fast_inverse(denom_init, 4*a+2);
+        for i in [1..sz] do
+            for j in [1..sz] do
+                src:=[A!0 : i in [1..a+1]];
+
+                for k in [0..a] do
+                    src[k+1]:=val[k+1][i][j];
+                end for;
+                dest:=next_values(src, denom_init, i_denom, a, 4*a+2);
+                for k in [0..4*a+1] do
+                    val[k+1][i][j]:=dest[k+1];
+                end for;
+            end for;
+        end for;
+
+        for k in [1..2*a+1] do
+            val[k]:=val[2*k]*val[2*k-1];
+        end for;
+
+        denom_init:=denom_init^2;
+
+    end for;
+
+    return &*(val[2^ell*d+1..1 by -1]);
+end function;
+
+/*----------------------------------------------------------*/
+/* given a polynomial matrix M, returns the matrix          */
+/* M(r+(K-1)s) .. M(r+s) M(r)                               */
+/* (naive algorithm)                                        */
+/*----------------------------------------------------------*/
+function matrix_factorial_naive(M, r, s, K)
+    if K eq 0 then return Parent(map(M,ev(0)))!1; end if;
+    return &*[map(M, ev(r+i*s)) : i in [K-1..0 by -1]];
+end function;
+
+/*----------------------------------------------------------*/
+/* given a polynomial matrix M, returns the matrix          */
+/* M(r+(K-1)s) .. M(r+s) M(r)                               */
+/* baby steps / giant steps, switches to naive for small K  */
+/*----------------------------------------------------------*/
+function matrix_factorial(M, r, s, K)
+    d:=Max([Degree(x) : x in Eltseq(M)]);
+    if K le d then
+	return matrix_factorial_naive(M, r, s, K);
+    end if;
+    ell:=0;
+    while (4^ell*d+2^ell le K) do
+	ell:=ell+1;
+    end while;
+    ell:=ell-1;
+    Kp:=4^ell*d+2^ell;
+    tmp1:=matrix_factorial_BGS(M, r, s, ell);
+    tmp2:=$$(M, r+s*Kp, s, K-Kp);
+    return tmp2*tmp1;
+end function;
+
+
+
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+/* Characteristic polynomials                               */
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+/* Computes the determinant of M using Hermite normal form  */
+/* The function returns a couple (unit, val) where:         */
+/*  . unit is the unit part of the determinant              */
+/*  . val is the valuation of the determinant               */
+/* Hence the determinant is X^val * unit                    */
+/* NB: The last coefficients might be wrong in general      */
+/*     they are not in the case we are interested in        */
+/*----------------------------------------------------------*/
+function determinant_hermite(M : verbose := false)
+    A := M;
+    S := Parent(A[1,1]); X := S.1;
+    infty := Precision(S);
+    if verbose then
+        print "  Precision:", infty;
+    end if;
+    n := NumberOfRows(A);
+    val := 0; unit := S!1; sgn := 1;
+    for j in [1..n] do
+        minv := infty; ii := 0;
+        for i in [j..n] do
+            v := Valuation(A[i,j]);
+            if v lt minv then
+                minv := v; ii := i;
+            end if;
+        end for;
+        if j ne ii then
+            SwapRows(~A, j, ii);
+            sgn := -sgn;
+        end if;
+        inv := -1 / (A[j,j] div X^minv);
+        ChangePrecision(~inv, infty);
+        for i in [j+1..n] do
+            v := Valuation(A[i,j]);
+            c := A[i,j] div X^minv;
+            ChangePrecision(~c, infty);
+            c := c * inv;
+            AddRow(~A, c, j, i);
+        end for;
+        if verbose then
+            print "  Column", j, "completed.";
+        end if;
+        val := val + minv;
+        unit := unit * (A[j,j] div X^minv);
+    end for;
+
+    return sgn*unit, val;
+end function;
+
+
+/*----------------------------------------------------------*/
+/* Computes the "twisted" characteristic polynomial         */
+/* det(aX - M)                                              */
+/*----------------------------------------------------------*/
+function twisted_charpoly_hermite(M, a : verbose := false)
+    S := Parent(M[1,1]);
+    k := BaseRing(S);
+    prec := Precision(S);
+    n := NumberOfRows(M);
+    precX := prec * (n+1);
+    T<X> := PowerSeriesRing(k, precX);
+
+    zeroes := [ k!0 : i in [1..n] ];
+    function to_X(f)
+        l, v := Eltseq(f);
+        ll := [ ];
+        for c in l do
+            Append(~ll, c);
+            ll cat:= zeroes;
+        end for;
+        return T!ll * X^((n+1)*v);
+    end function;
+    A := Matrix(n, n, [[ to_X(M[i,j]) : j in [1..n]] : i in [1..n]]);
+
+    if a eq 1 then
+        unit, val := determinant_hermite(X - A : verbose := verbose);
+    else
+        unit, val := determinant_hermite(to_X(a)*X - A : verbose := verbose);
+    end if;
+
+    coeffs := [ ];
+    for i in [0..n] do
+        q, m := Quotrem(i-val, n+1);
+        l := [ ];
+        while m lt Precision(unit) do
+            Append(~l, Coefficient(unit, m));
+            m := m + (n+1);
+        end while;
+       	u := S!l; ChangePrecision(~u, #l);
+        Append(~coeffs, [* u, -q *]);
+    end for;
+
+    return coeffs;
+end function;
+
+
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+/* Stuff for differential operators                         */
+/* Operators are either in D or theta                       */
+/* In any case, they are just sequences of polynomials      */
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+
+/*----------------------------------------------------------*/
+/* converts a polynomial in theta to an operator in x and D */
+/*----------------------------------------------------------*/
+function pol_theta_to_xD(P)
+    if P eq 0 then return P; end if;
+    U<X>:=Parent(P);
+    k:=BaseRing(U);
+    return U!newton_interpolation(fast_evaluate(P, [k!i : i in [0..Degree(P)]]));
+end function;
+
+/*----------------------------------------------------------*/
+/* converts a polynomial in x and D to an operator in theta */
+/*----------------------------------------------------------*/
+function pol_xD_to_theta(P)
+    if P eq 0 then return P; end if;
+    U<X>:=Parent(P);
+    k:=BaseRing(U);
+    return fast_interpolation(newton_evaluation(Coefficients(P)), [k!i : i in [0..Degree(P)]]);
+end function;
+
+/*----------------------------------------------------------*/
+/* converts an operator in theta to an operator in x and D  */
+/*----------------------------------------------------------*/
+function theta_D_to_x_D(P)
+    pol:=P[1];
+    val:=P[2];
+    if pol eq [] then return P; end if;
+    U:=Universe(pol);
+
+    xD:=[pol_theta_to_xD(f) : f in pol];
+    tmp:=[U!([0 : i in [0..j-#xD]] cat
+	Reverse([Coefficient(xD[i], j-(i-1)) : i in [1..Min(#xD, j+1)]]) cat [0]) : j in [0..#xD+Max([Degree(x) : x in xD])]];
+
+    while #tmp ge 1 and tmp[#tmp] eq U!0 do
+	tmp:=tmp[1..#tmp-1];
+    end while;
+
+    while #tmp ge 1 and tmp[1] eq U!0 do
+	tmp:=tmp[2..#tmp];
+	val:=val+1;
+    end while;
+
+    return [*tmp, val*];
+end function;
+
+/*----------------------------------------------------------------*/
+/* converts an operator in x and D to an operator in theta and D  */
+/*----------------------------------------------------------------*/
+function x_D_to_theta_D(P)
+    pol:=P[1];
+    val:=P[2];
+    if pol eq [] then return P; end if;
+    U:=Universe(pol);
+    
+    s:=Max([Degree(pol[i])-(i-1) : i in [1..#pol]]);
+    val:=val-s;
+
+    coef:=[U!([0 : i in [1..j]] cat [Coefficient(pol[i], i+j-1) : i in [1..#pol] | i+j-1 ge 0]) : j in [s..-#pol+1 by -1]];
+    tmp:=[pol_xD_to_theta(a) : a in coef];
+
+    while #tmp ge 1 and tmp[#tmp] eq U!0 do
+	tmp:=tmp[1..#tmp-1];
+    end while;
+
+    while #tmp ge 1 and tmp[1] eq U!0 do
+	tmp:=tmp[2..#tmp];
+	val:=val+1;
+    end while;
+
+    return [*tmp, val*];
+end function;
+
+
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+/* p-curvature                                              */
+/* for all these functions, operators are represented as    */
+/* sequences with polynomial                                */
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+
+/*----------------------------------------------------------*/
+/* given an operator in D, computes its companion matrix    */
+/*----------------------------------------------------------*/
+function matrix_from_D(P)
+    r:=#P;
+    F:=Universe(P);
+    M:=MatrixRing(F, r-1)!0;
+    for i in [1..r-2] do
+	M[i+1][i]:=P[r];
+    end for;
+    for i in [1..r-1] do
+	M[i][r-1]:=-P[i];
+    end for;
+    return M;
+end function;
+
+
+/*----------------------------------------------------------*/
+/* given an operator in x and D, computes the charpoly of   */
+/* its p-curvature, renormalized                            */
+/* assumes that all coefficients are polynomials            */
+/* naive algorithm                                          */
+/*----------------------------------------------------------*/
+function p_curvature_x_D_rat(P)
+    UP:=Universe(P);
+    assert Type(UP) eq RngUPol;
+    
+    p:=Characteristic(UP);
+    F<xx>:=FieldOfFractions(UP);
+    PP:=[F!a/P[#P] : a in P];
+    A1:=matrix_from_D(PP);
+    A:=A1;
+
+    for k in [2..p] do
+	A:=map(A, Derivative) + A1*A;
+    end for;
+    tmp:=P[#P]^p*CharacteristicPolynomial(A);
+    return tmp;
+end function;
+
+
+/*----------------------------------------------------------*/
+/* given an operator in x and D, computes the charpoly of   */
+/* its p-curvature (renormalized); fraction-free version    */
+/* assumes that all coefficients are polynomials            */
+/* naive algorithm                                          */
+/*----------------------------------------------------------*/
+function p_curvature_x_D(P)
+    UP:=Universe(P);
+    assert Type(UP) eq RngUPol;
+    p:=Characteristic(UP);
+    F<xx>:=FieldOfFractions(UP);
+    A1:=matrix_from_D(P);
+    A:=A1;
+
+    Pr:=P[#P];
+    dPr:=Derivative(Pr);
+    for k in [2..p] do
+	A:=Pr*map(A, Derivative) + A1*A - (k-1)*dPr*A;
+    end for;
+    A:=ChangeRing(A, F);
+    tmp:=Pr^p*CharacteristicPolynomial(1/Pr^p*A);
+    return ChangeRing(tmp, UP);
+end function;
+
+
+/*----------------------------------------------------------*/
+/* given an operator in theta and D, computes the charpoly  */
+/* of its p-curvature (renormalized)                        */
+/* baby steps / giant steps algorithm                       */
+/* P can be either                                          */
+/* - a sequence of polynomials or                           */
+/* - a list [seq, val], where val the valuaion in D         */
+/* (in the first case, it is assumed to be zero)            */
+/* assumes that p is not too small                          */
+/* optional arguments:                                      */
+/* - verbose (boolean: prints runtime information)          */
+/* - save_fact (boolean: saves a factorial; for debugging)  */
+/* - fact_C_S (precomputed factorial; for debugging)        */
+/*----------------------------------------------------------*/
+function p_curvature_theta_D(P : verbose := false, save_fact := false, fact_C_S := 0)
+    if Type(P) eq List then
+        vald := P[2];
+        P := P[1];
+    else
+        vald := 0;
+    end if;
+
+    U:=Universe(P);
+    k:=BaseRing(U);
+    p:=Characteristic(k);
+	
+    C:=matrix_from_D(P);
+    den:=P[#P];
+	
+    n := NumberOfRows(C);
+    dmax:=Max([Degree(x) : x in P]);
+    nb_roots:=&+([0] cat [x[2] : x in Roots(den)]);
+    prec := dmax + nb_roots + 1;
+    S<z>:=PowerSeriesRing(k, prec);
+    if p le dmax then
+	print "dmax =", dmax;
+        error "Not implemented: p must be greater than dmax";
+    end if;
+    if verbose then
+        print "size =", n;
+        print "dmax =", dmax;
+        print "nb_roots =", nb_roots;
+        print "prec =", prec;
+    end if;
+
+    if fact_C_S eq 0 then
+        if verbose then
+            print "Computation of the matrix factorial...";
+        end if;
+        fact_C_S := matrix_factorial(C, z+p-1, -1, p);
+
+        if save_fact then
+            FileName := "fact_C_S.mgm";
+            PrintFile(FileName, "": Overwrite:=true);
+            PrintFile(FileName, "p:=" cat Sprint(p) cat ";");
+            PrintFile(FileName, "k:=GF(p);");
+            PrintFile(FileName, "S<z>:=PowerSeriesRing(k, " cat Sprint(Precision(S)) cat ");");
+            PrintFile(FileName, "fact_C_S:=");
+            PrintFileMagma(FileName, fact_C_S);
+            PrintFile(FileName, ";");
+        end if;
+    end if;
+
+    if verbose then
+        print "Computation of the resultant...";
+    end if;
+    R<X,Y> := PolynomialRing(k,2);
+    P1 := Evaluate(den, X);
+    P2 := X^p - X + Y;
+    deg := Degree(den);
+    Res := (-1)^(deg) * Resultant(P1, P2, X);
+    fact_den_S := S![ k!Coefficient(Res, Y, i) : i in [0..deg] ];
+
+    if verbose then
+        print "Computation of the characteristic polynomial...";
+    end if;
+    coeffs := twisted_charpoly_hermite(fact_C_S, fact_den_S : verbose := verbose);
+
+    if verbose then
+        print "Reordering coefficients...";
+    end if;
+    PolRing<U> := PolynomialRing(k);
+    LauRing<V> := PolynomialRing(PolRing);  // LaurentPolynomialRing???
+    unit := fact_den_S div z^nb_roots;
+    unit_scalar := unit^(1-n);
+    val_scalar := nb_roots * (1-n);
+    i := 0; ans := LauRing!0;
+    for l in coeffs do
+        c := l[1]; v := l[2];
+        c := l[1] * unit_scalar * z^(v + val_scalar);
+        max := Min(dmax, Precision(c)-1);
+        for j in [0..max] do
+            cf := Coefficient(c, j);
+            if cf ne 0 then
+                ans := ans + Coefficient(c, j) * (-U)^j * V^(i+j+vald);
+            end if;
+        end for;
+        i := i + 1;
+    end for;
+
+    return ans;
+end function;
+
+
+/*----------------------------------------------------------*/
+/* tests that all routines give the same result             */
+/*----------------------------------------------------------*/
+procedure test()
+    p:=47;
+    k:=GF(p);
+    U<x>:=PolynomialRing(k);
+    d:=5;
+    r:=5;
+
+    pol_x_D:=[U![Random(k) : i in [0..d]] : j in [0..r]];
+    // 0 is the valuation in d
+    P_x_D:=[*pol_x_D, 0*];
+    P_theta_D:=x_D_to_theta_D(P_x_D);
+
+    print "Rational computation:";
+    time pcurv_rat:=p_curvature_x_D_rat(P_x_D[1]);
+    print "Fraction free computation:";
+    time pcurv_ff:=p_curvature_x_D(P_x_D[1]);
+    print "Our algorithm:";
+    time pcurv_fast:=p_curvature_theta_D(P_theta_D);
+
+    assert pcurv_rat eq pcurv_ff;
+    xx := BaseRing(Parent(pcurv_rat)).1;
+    assert [ Evaluate(c, xx^p) : c in Coefficients(pcurv_fast) ] eq Coefficients(pcurv_rat);
+end procedure;
+
+test();
