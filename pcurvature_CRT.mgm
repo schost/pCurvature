@@ -1,0 +1,806 @@
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+/* computing the p-curvature of a system                    */
+/* Algorithm from                                           */
+/* A fast algorithm for computing the p-curvature           */
+/* A. Bostan, X. Caruso, E. Schost, 2015                    */                           
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+/* misc                                                     */
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+
+/*----------------------------------------------------------*/
+/* computes [pol(x-v) : pol in P]                           */
+/* helper function                                          */
+/*----------------------------------------------------------*/
+function shift_polys_rec(P, v, nb)
+    U:=Universe(P);
+    x:=U.1;
+
+    if nb le 10 then
+	return [Evaluate(pol, x-v) : pol in P], (x-v)^nb;
+    end if;
+	
+    nb2:=nb div 2;
+
+    low, pow:=$$([U! [Coefficient(pol, i) : i in [0..nb2-1]] : pol in P], v, nb2);
+    high:=$$([U! [Coefficient(pol, i) : i in [nb2..nb-1]] : pol in P], v, nb-nb2);
+
+    new_pow:=pow*pow;
+    if IsOdd(nb) then
+	new_pow:=(x-v)*new_pow;
+    end if;
+    
+    return [low[i] + pow*high[i] : i in [1..#low]], new_pow;
+    
+end function;
+
+/*----------------------------------------------------------*/
+/* computes [pol(x-v) : pol in P]                           */
+/*----------------------------------------------------------*/
+function shift_polys(P, v)
+    if v eq 0 then return P; end if;
+	
+    deg:=Max([Degree(pol) : pol in P]);
+    nb:=deg+1;
+    return shift_polys_rec(P, v, nb);
+end function;
+	
+
+/*----------------------------------------------------------*/
+/* applies f to all entries of a matrix or a sequence       */
+/*----------------------------------------------------------*/
+function map(M, f)
+    if Type(M) eq ModMatRngElt or Type(M) eq AlgMatElt then
+	m:=NumberOfRows(M);
+	n:=NumberOfColumns(M);
+	return Matrix(m, n, [[f(M[i][j]) : j in [1..n]] : i in [1..m]]);
+    end if;
+    if Type(M) eq SeqEnum then
+	return [f(x) : x in M];
+    end if;
+    error "map: not implemented";
+end function;
+
+
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+/* arithmetic for divided powers                            */
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+
+/*----------------------------------------------------------*/
+/* conversion to divided powers                             */
+/* applies to polynomials or sequences of polynomials       */
+/*----------------------------------------------------------*/
+function to_dp(pol)
+    if Type(pol) eq SeqEnum then
+	return [$$(x) : x in pol];
+    end if;
+    
+    U:=Parent(pol);
+    k:=BaseRing(pol);
+    d:=Degree(pol);
+    fact:=[k!1];
+    for i in [1..d] do
+	Append(~fact, i*fact[i]);
+    end for;
+    return U![Coefficient(pol, i)*fact[i+1] : i in [0..d]];
+end function;
+
+/*----------------------------------------------------------*/
+/* conversion from divided powers                           */
+/* applies to polynomials or sequences of polynomials       */
+/* only looks at coefficients up to p                       */
+/*----------------------------------------------------------*/
+function from_dp(pol)
+    // yuk
+    if Type(pol) eq SeqEnum then
+
+	U:=Universe(pol);
+	k:=BaseRing(U);
+	deg:=Max([Degree(poly) : poly in pol | poly ne 0]);
+	d:=Min(Characteristic(k)-1, deg);
+	ifact:=[k!1];
+	for i in [1..d] do
+	    Append(~ifact, ifact[i]/i);
+	end for;
+	return [U![Coefficient(poly, i)*ifact[i+1] : i in [0..d]] : poly in pol];
+	
+    end if;
+
+    U:=Parent(pol);
+    k:=BaseRing(U);
+    d:=Min(Characteristic(k)-1, Degree(pol));
+    ifact:=[k!1];
+    for i in [1..d] do
+	Append(~ifact, ifact[i]/i);
+    end for;
+    return U![Coefficient(pol, i)*ifact[i+1] : i in [0..d]];
+end function;
+
+
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+/* basic algorithms for differential operators              */
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+
+/*----------------------------------------------------------*/
+/* given an operator in D, computes its companion matrix    */
+/*----------------------------------------------------------*/
+function matrix_from_D(diffop)
+    r:=#diffop;
+    F:=Universe(diffop);
+    M:=MatrixRing(F, r-1)!0;
+    for i in [1..r-2] do
+	M[i+1][i]:=diffop[r];
+    end for;
+    for i in [1..r-1] do
+	M[i][r-1]:=-diffop[i];
+    end for;
+    return M;
+end function;
+
+/*----------------------------------------------------------*/
+/* given an operator in x and D, computes the numerator of  */
+/* its p-curvature and the common denominator               */
+/* fraction-free version                                    */
+/*----------------------------------------------------------*/
+function p_curvature(diffop)
+    UP:=Universe(diffop);
+    p:=Characteristic(UP);
+    F:=FieldOfFractions(UP);
+    A1:=matrix_from_D(diffop);
+    A:=A1;
+
+    Pr:=diffop[#diffop];
+    dPr:=Derivative(Pr);
+    for k in [2..p] do
+	A:=Pr*map(A, Derivative) + A1*A - (k-1)*dPr*A;
+    end for;
+    return A, Pr^p;
+end function;
+
+/*----------------------------------------------------------*/
+/* A direct algorithm to evaluate a diff-op (in divided     */
+/* powers representation) at a solution (in divided powers  */
+/* representation                                           */
+/*----------------------------------------------------------*/
+function evaluate_op_dp_y_dp(diffop_dp, y_dp)
+    y1:=y_dp;
+    res:=Parent(y1)!0;
+    for c in diffop_dp do
+	res:=res+ to_dp(from_dp(c)*from_dp(y1));
+	y1:=y1 div Parent(y1).1;
+    end for;
+    return res;
+end function;
+
+
+
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+/* some Newton iteration stuff                              */
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+
+/*----------------------------------------------------------*/
+/* computes 1/W, where W is a matrix of power series        */
+/* assume W0 is the identity                                */
+/*----------------------------------------------------------*/
+function fast_inverse_series_matrix(W)
+    c0:=func<P|Coefficient(P,0)>;
+    id0:=Parent(W)!1;
+    
+    if (map(W, c0) ne id0) then
+	error "constant coefficient not identity";
+    end if;
+
+    // a will be of the form x^c, so computes M+O(x^c)
+    function trunc(M, a)
+	return Matrix([[M[i,j]+a : j in [1..NumberOfColumns(M)]] : i in [1..NumberOfRows(M)]]);
+    end function;
+
+    // if M has entries m_ij + O(x^c), returns the matrix with entries m_ij
+    function un_trunc(ser)
+	c, v:=Coefficients(ser);
+	return Parent(ser)!([0 : i in [0..v-1]] cat c);
+    end function;
+
+    // if M has entries m_ij + O(x^c), and a is O(x^d), d >= c, returns the matrix with entries m_ij + O(x^d)
+    function lift(M, a)
+	return Matrix([[un_trunc(M[i,j])+a : j in [1..NumberOfColumns(M)]] : i in [1..NumberOfRows(M)]]);
+    end function;
+  
+    US:=BaseRing(Parent(W));
+    Prec:=Precision(US);
+    PrecLoc:=1;
+    u:=US.1;
+    v:=US.1;
+    R:=Parent(W)!1;
+    
+    repeat
+	R:=lift(R, O(u^2));
+	R:=2*R-R*(W+O(u^2))*R;
+	u:=u^2+O(v^Prec);
+	PrecLoc*:=2;
+    until PrecLoc ge Prec;
+    
+    return R;
+end function;
+
+/*----------------------------------------------------------*/
+/* computes 1/W at precision d, where W is matrix with      */
+/* polynomial entries                                       */
+/*----------------------------------------------------------*/
+function fast_inverse_matrix(W, d)
+    function coeffs(ser)
+	c, v:=Coefficients(ser);
+	return [0 : i in [0..v-1]] cat c;
+    end function;
+
+    Pol:=BaseRing(Parent(W));
+    U:=LaurentSeriesRing(BaseRing(Pol), d);
+    W_s:=Matrix([[U!W[i,j] : j in [1..NumberOfColumns(W)]] : i in [1..NumberOfRows(W)]]);
+    tmp:=fast_inverse_series_matrix(W_s);
+    
+    return Matrix([[Pol!coeffs(tmp[i,j]) : j in [1..NumberOfColumns(W)]] : i in [1..NumberOfRows(W)]]);
+end function;
+
+/*----------------------------------------------------------*/
+/* solves M u = v at precision prec                         */
+/* knowing iM=M^-1 at precision 30                          */
+/* recursive helper function                                */
+/*----------------------------------------------------------*/
+function solve_dac_series(M, v, iM, prec)
+    U:=Universe(v);
+    x:=U.1;
+    r:=NumberOfRows(M);
+    if prec le 30 then
+	V:=PolynomialRing(BaseRing(U));
+	tmp:=iM*Matrix(r, 1, [V![Coefficient(pol, i) : i in [0..prec-1]] : pol in v]);
+	return [U![Coefficient(pol, i) : i in [0..prec-1]] : pol in Eltseq(tmp)];
+    end if;
+
+    prec2:=prec div 2;
+
+    M2:=Matrix([[M[i,j]+O(x^prec2) : j in [1..r]] : i in [1..r]]);
+    v2:=[v[i]+O(x^prec2) : i in [1..r]];
+    w2:=$$(M2, v2, iM, prec2);
+    
+    prec3:=prec-prec2;
+    rem1:=M*Matrix(r, 1, w2);
+    rem:=[ (v[i] - rem1[i,1]) : i in [1..r]];
+    rem:=[ U![Coefficient(rem[i], j) : j in [prec2..prec-1]] + O(x^prec3) : i in [1..r]];
+
+    M3:=Matrix([[M[i,j]+O(x^prec3) : j in [1..r]] : i in [1..r]]);
+    w3:=$$(M3, rem, iM, prec3);
+
+    return [ U! ([Coefficient(w2[j], i) : i in [0..prec2-1]] cat [Coefficient(w3[j], i) : i in [0..prec3-1]]) : j in [1..r]];
+end function;
+
+/*----------------------------------------------------------*/
+/* solves M u = v at precision prec                         */
+/*----------------------------------------------------------*/
+function solve_dac(M, v, prec)
+
+    iM:=fast_inverse_matrix(M, 30);
+
+    U:=Universe(v);
+    k:=BaseRing(U);
+    L:=LaurentSeriesRing(k, prec);
+    h:=func<P | L!P>;
+    tmp:=solve_dac_series(map(M, h), map(v, h), iM, prec);
+
+    function coef(ser)
+	c, v:=Coefficients(ser);
+	return [0 : i in [0..v-1]] cat c;
+    end function;
+
+    return [U!coef(pol) : pol in tmp];
+end function;
+
+/*----------------------------------------------------------*/
+/* computes 1/P mod x^prec                                  */
+/*----------------------------------------------------------*/
+function inverse(P, prec)
+    iP:=Parent(P)!1/Coefficient(P, 0);
+    x:=Parent(P).1;
+    prec_loc:=1;
+
+    while prec_loc lt prec do
+	prec_loc:=2*prec_loc;
+	iP:= 2*iP - (iP*(iP* P mod x^prec_loc)) mod x^prec_loc;
+    end while;
+
+    return iP mod x^prec;
+end function;
+
+/*----------------------------------------------------------*/
+/* computes a basis of solutions up to precision p          */
+/* uses Newton iteration                                    */
+/* also returns the inverse basis, and the companion matrix */
+/*----------------------------------------------------------*/
+function solve_diffeq_Newton(diffop)
+    U:=Universe(diffop);
+    x:=U.1;
+    p:=Characteristic(U);
+    
+    inv_lt:=inverse(diffop[#diffop], p);
+    diffop_uni:=[diffop[i]*inv_lt mod x^p: i in [1..#diffop-1]] cat [1];
+    
+    A:=Transpose(matrix_from_D(diffop_uni));    
+    W:=Parent(A)!1;
+    Z:=W;
+    prec:=2;
+
+    int:=func<P |  Parent(P)!( [0] cat [Coefficient(P, i)/(i+1) : i in [0..p-2]] )>;
+
+    while prec/2 le p do
+	prec:=Min(p, prec);
+	tr:=func< P | Parent(P)![Coefficient(P, i) : i in [0..prec-1]] >;
+	W:= W - map(W*map(map(Z*map( map(W, Derivative) -map(A, tr)*W, tr), tr), int), tr);
+	Z:= Z + map(Z * (Parent(Z)!1-map(W*Z, tr)), tr);
+	if prec eq p then
+	    break;
+	else
+	    prec:=2*prec;
+	end if;
+    end while;
+
+    tr:=func< P | Parent(P)![Coefficient(P, i) : i in [0..p-1]] >;
+    return map(W, tr), map(Z, tr), A;
+end function;
+
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+/* Working with field extensions                            */
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+
+/*----------------------------------------------------------*/
+/* returns A such that A(f) = g mod h                       */
+/* ultra-naive algorithm                                    */
+/*----------------------------------------------------------*/
+function inverse_modular_composition(f, g, h)
+    U:=Parent(h);
+    L:=quo<U|h>;
+    pows:=[L!1];
+    ff:=L!f;
+    for i in [1..Degree(h)-1] do
+	Append(~pows, pows[#pows]*ff);
+    end for;
+    M:=Matrix([[Coefficient(pows[j], i) : j in [1..#pows]] : i in [0..#pows-1]]);
+    gg:=L!g;
+    v:=Vector([Coefficient(gg, j) : j in [0..#pows-1]]);
+    sol:=Solution(Transpose(M), v);
+    return U!Eltseq(sol);
+end function;
+
+/*----------------------------------------------------------*/
+/* performs a change of basis                               */
+/* P mod < (x-v)^p, f(v) > to P mod < f(x)^p, v-Q(x)^p >    */
+/* P must be in the polynomial ring k[v, x]                 */
+/* should be linear in p, but this implementation is not    */
+/* OOPS: new version, P is a sequence now!                  */
+/*----------------------------------------------------------*/
+function bivariate_change_basis(P, F)
+
+    // just in case: support the case where P is a polynomial
+    if Type(P) eq RngUPolElt then
+	return $$([P])[1];
+    end if;
+    
+    U:=Parent(F);
+    p:=Characteristic(U);
+    L:=quo<U|F>;
+    xp:=L.1^p;
+    Q:=inverse_modular_composition(U!xp, U.1, F);
+    x:=U.1;
+    function modcomp(f, g, h)
+	if Degree(f) eq 0 then
+	    return f;
+	else
+	    return ModularComposition(f, g, h);
+	end if;
+    end function;
+    
+    crem:=[[modcomp(U!Coefficient(pol, i), Q, F) : i in [0..p-1]] : pol in P];
+    prem:=[U!&cat [[ Coefficient(pol[i],j) : i in [1..#pol]] : j in [0..Degree(F)-1]] : pol in crem];
+
+    return prem;
+end function;
+
+
+
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+/* computing divided powers solutions                       */
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+
+/*----------------------------------------------------------*/
+/* returns the polynomial x(x-1)..(x-(i+1))                 */
+/* with coefficients in k                                   */
+/*----------------------------------------------------------*/
+function falling_factorial(k, i)
+    U<x>:=PolynomialRing(k);    
+    return &*([PolynomialRing(k)!1] cat [x-j : j in [0..i-1]]);
+end function;
+
+/*----------------------------------------------------------*/
+/* computes the recurrence associated to a diff-op in       */
+/* divided power representation                             */
+/*----------------------------------------------------------*/
+function diffeq_dp_to_rec(diffop_dp)
+    U:=Universe(diffop_dp);
+    k:=BaseRing(U);
+    x:=U.1;
+    d:=Max([Degree(pol) : pol in diffop_dp]);
+    r:=#diffop_dp-1;
+
+    recu:=[];
+    for m in [-d..r] do
+	tmp:=U!0;
+	for i in [0..r] do
+	    if i-m ge 0 and i-m le d then
+		tmp := tmp  + Coefficient(diffop_dp[i+1], i-m)/Factorial(i-m)*falling_factorial(k, i-m);
+	    end if;
+	end for;
+	Append(~recu, tmp);
+    end for;
+    return recu;
+end function;
+
+/*----------------------------------------------------------*/
+/* computes a basis of solution with N terms                */
+/* the recurrence comes from a diff-op of order "order"     */
+/*----------------------------------------------------------*/
+function solutions_rec_dp(recu, order, N : Verbose := 0)
+    n:=#recu;
+    recu1:=recu[1..n-1];
+    lterm:=recu[n];
+
+    start := Cputime();
+    values_rec:=[[Evaluate(pol, i-order-1) : i in [order+1..N]] : pol in recu1];
+    values_lterm:=[Evaluate(lterm, i-order-1) : i in [order+1..N]];
+    basis:=[];
+    if Verbose gt 1 then
+        print "Evaluation:", Sprint(Cputime(start)) cat "s";
+    end if;
+    
+    k:=BaseRing(Universe(recu1));
+    for j in [1..order] do
+        start := Cputime();
+	init:=[k! 0 : i in [1..order]];
+	init[j]:=1;
+	init2:=[0 : i in [1..n-order-1]] cat init;
+	for i in [1..N-order-1+1] do
+	    tmp:=init2[i..i+n-2];
+	    Append(~init2, -&+[tmp[j]*values_rec[j][i] : j in [1..n-1]]/values_lterm[i]);
+	end for;
+	Append(~basis, PolynomialRing(k) ! init2[n+1-order-1..n+N-order-1]);
+        if Verbose gt 1 then
+            print "Solution", j, "(of " cat Sprint(order) cat "):", Sprint(Cputime(start)) cat "s";
+        end if;
+    end for;
+    return basis;
+end function;
+
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+/* main algo                                                */
+/*----------------------------------------------------------*/
+/*----------------------------------------------------------*/
+
+/*----------------------------------------------------------*/
+/* computes the sequence of coefficients of d^p mod diffop  */
+/* all truncated modulo x^p                                 */
+/* uses the recurrence                                      */
+/*----------------------------------------------------------*/
+function remainder_dp_mod_xp_recurrence(diffop : Verbose := 0)
+    U:=Universe(diffop);
+    x:=U.1;
+    p:=Characteristic(U);
+    r:=#diffop - 1;
+    
+    start := Cputime();
+    diffop_dp:=to_dp(diffop);
+    recu_dp:=diffeq_dp_to_rec(diffop_dp);
+    basis_dp:=solutions_rec_dp(recu_dp, r, 2*p+r+1 : Verbose := Verbose);
+    basis_dp_shifted:=[y div x^p : y in basis_dp];
+    if Verbose gt 0 then
+        print "setup:", Sprint(Cputime(start)) cat "s";
+    end if;
+
+    start := Cputime();
+    entries:=&cat [[basis_dp[j+1] div x^i : i in [0..r-1]] : j in [0..r-1]];
+    entries_dp:=from_dp(entries);
+    W_dp:=Matrix(r, r, entries_dp);
+    G_dp:=[from_dp(x) : x in basis_dp_shifted];
+    C2:=solve_dac(W_dp, G_dp, p);
+    if Verbose gt 0 then
+	"Reconstruction by dac", Cputime(start);
+    end if;
+
+    // to compare with other approaches (Newton or built-in Solutions)
+    if Verbose ge 3 then
+	start:=Cputime();
+	entries:=&cat [[basis_dp[j+1] div x^i : i in [0..r-1]] : j in [0..r-1]];
+	entries_dp:=from_dp(entries);
+	W_dp:=Matrix(r, r, entries_dp);
+	G_dp:=Matrix(r, 1, [from_dp(x) : x in basis_dp_shifted]);
+	iW_dp:=fast_inverse_matrix(W_dp, p);
+	C1:=iW_dp*G_dp;
+	"Reconstruction by Newton iteration", Cputime(start);
+	assert Eltseq(map(C1, func<P | U![Coefficient(P, i) : i in [0..p-1]]>)) eq Eltseq(map(C2, func<P | U![Coefficient(P, i) : i in [0..p-1]]>));
+
+	start := Cputime();
+	US:=PowerSeriesRing(BaseRing(U), p+2);
+	// here, use the new from_dp
+	W_dp:=Matrix(r, r, [[US!from_dp(basis_dp[j+1] div x^i) : j in [0..r-1]] : i in [0..r-1]]);
+	G_dp:=Matrix(1, r, [US!from_dp(x) : x in basis_dp_shifted]);
+	C := Solution(W_dp, G_dp);
+	print "Reconstruction:", Sprint(Cputime(start)) cat "s";
+	assert Eltseq(map(C, func<P | U![Coefficient(P, i) : i in [0..p-1]]>)) eq Eltseq(map(C2, func<P | U![Coefficient(P, i) : i in [0..p-1]]>));
+    end if;
+
+    return Eltseq(map(C2, func<P | U![Coefficient(P, i) : i in [0..p-1]]>));
+end function;
+
+
+/*----------------------------------------------------------*/
+/* computes the sequence of coefficients of d^p mod diffop  */
+/* all truncated modulo x^p                                 */
+/* uses Newton iteration                                    */
+/*----------------------------------------------------------*/
+function remainder_dp_mod_xp_Newton(diffop : Verbose := 0)
+    start:=Cputime();
+    basis, ibasis, A:=solve_diffeq_Newton(diffop);
+    if Verbose gt 0 then
+	"Solving the ODE with Newton", Cputime(start);
+    end if;
+
+    start:=Cputime();
+    r:=#diffop-1;
+    U:=Universe(diffop);
+    x:=U.1;
+    p:=Characteristic(U);
+    c:=func<P | Coefficient(P, p-1) >;
+
+    // that's dumb, but it's kind of harmless
+    R0:=-Transpose(basis*map(A*basis, c));
+    rhs:=[R0[i,1] : i in [1..r]];
+    res:=Eltseq(Transpose(ibasis)*Matrix(r,1,rhs));
+    res:=[U! [Coefficient(pol, i) : i in [0..p-1]] : pol in res];
+    if Verbose gt 0 then
+	"All other stuff", Cputime(start);
+    end if;
+
+    return res;
+    
+end function;
+
+/*----------------------------------------------------------*/
+/* computes the sequence of coefficients of d^p mod diffop  */
+/* all truncated modulo x^p                                 */
+/*----------------------------------------------------------*/
+function remainder_dp_mod_xp(diffop : Verbose := 0, Newton:=false)
+    if Newton then
+	res:=remainder_dp_mod_xp_Newton(diffop : Verbose:=Verbose);
+	return res;
+    else
+	return remainder_dp_mod_xp_recurrence(diffop : Verbose:=Verbose);
+    end if;
+end function;
+
+
+/*------------------------------------------------------------*/
+/* diffop has coefficients in a field K                       */
+/* F is a polynomial with coefficients in K                   */
+/* returns the remainder of d^p mod F^p                       */
+/* the leading coefficient of diffop must be invertible mod F */
+/*------------------------------------------------------------*/
+function remainder_dp_mod_Fp(diffop, F : Verbose := 0, Newton:=false)
+    U:=Universe(diffop);
+    x:=U.1;
+    p:=Characteristic(U);
+    pow:= p + 2 - #diffop;
+
+    // when F has degree 1, it may be more efficient to not do any dummy extension
+    if Degree(F) eq 1 then
+	v:=-Coefficient(F, 0);
+	diffop_v:=[Evaluate(pol, x+v) : pol in diffop];
+	rem_v:=remainder_dp_mod_xp(diffop_v : Verbose := Verbose, Newton:=Newton);
+	denom_v:=diffop_v[#diffop_v]^pow;
+	rem_v_den:=[ pol*denom_v : pol in rem_v];
+	rem_v:=[ U![Coefficient(pol, i) : i in [0..p-1]] : pol in rem_v_den];
+	rem_v_shift:=shift_polys(rem_v, v);
+
+	if false then
+	    rem_v_shift_old:=[Evaluate(pol, x-v) : pol in rem_v];
+	    print rem_v_shift eq rem_v_shift_old;
+	end if;
+	
+	return rem_v_shift, x^p-v^p;
+    else
+
+	QF:=quo<U|F>;
+	UQ:=PolynomialRing(QF);
+	diffop_Q:=[UQ!pol : pol in diffop];
+	rem, modulus:=$$(diffop_Q, UQ.1-QF.1);
+	return bivariate_change_basis(rem, F);
+
+    end if;
+end function;
+
+
+/*----------------------------------------------------------*/
+/* Chinese Remainder Theorem over F_p[x]                    */
+/* when all moduli are polynomials in x^p                   */
+/* NOTE: d is the maximum degree of a modulus               */
+/*----------------------------------------------------------*/
+function CRT_p(lRem, lMod, d : Verbose := 0)
+    U := Parent(lMod[1]);
+    p := Characteristic(U);
+
+    start := Cputime();
+
+    pols := [ ];
+    mods := [ U![ Coefficient(pol,p*n) : n in [0..d] ] : pol in lMod ];
+    for j in [0..p-1] do
+        rems := [ U![ Coefficient(pol,p*n+j) : n in [0..d-1] ] : pol in lRem ];
+        Append(~pols, CRT(rems, mods));
+    end for;
+
+    ans := [ ];
+    for n in [0..#lMod*d-1] do
+        ans cat:= [ Coefficient(pols[j],n) : j in [1..p] ];
+    end for;
+
+    if Verbose gt 1 then
+        print "CRT_p:", Cputime(start);
+    end if;
+
+    return U!ans;
+end function;
+
+/*----------------------------------------------------------*/
+/* returns the numerator of d^p mod diffop                  */
+/* and the denominator, which is the leading term^p         */
+/*----------------------------------------------------------*/
+function remainder_dp(diffop : Verbose := 0, Store := "", Newton:=false)
+    U:=Universe(diffop);
+    k:=BaseRing(U);
+    p:=Characteristic(k);
+    d:=Max([Degree(x) : x in diffop]);
+    pow := p + 2 - #diffop;
+    x:=U.1;
+
+    if Verbose gt 0 then
+        print "p =", p;
+        print "d =", d;
+        print "r =", #diffop-1;
+    end if;
+
+    lterm:=diffop[#diffop];
+    denom:=lterm^pow;
+
+    lRem:=[];
+    lMod:=[];
+
+    deg:=0;
+    dext:=1;
+    ell:=ext<k|dext>;
+    done:=false;
+    while true do
+	for v in ell do
+            if Verbose gt 0 then
+                print "New element:", v;
+            end if;
+            F := MinimalPolynomial(v);
+	    if Evaluate(lterm, v) ne 0 and Degree(F) eq dext then
+
+		if Verbose gt 0 then
+		    start:=Cputime();
+		end if;
+		
+                // Add here something for loading the result if the file Store.v exists
+
+		rem, modulus:=remainder_dp_mod_Fp(diffop,F : Verbose := Verbose, Newton:=Newton);
+                if Store ne "" then
+                    FileName := Store cat "." cat Sprint(v);
+                    PrintFile(FileName, "" : Overwrite := true);
+                    PrintFile(FileName, "rem := " cat Sprint(rem) cat ";");
+                    PrintFile(FileName, "modulus := " cat Sprint(modulus) cat ";");
+                end if;
+		Append(~lRem, rem);
+		Append(~lMod, modulus);
+		deg:=deg+p;
+
+		if Verbose gt 0 then
+		    "Done", Cputime(start);
+		end if;
+		
+	    end if;
+	    if deg gt d*pow then
+		done:=true;
+		break;
+	    end if;
+	end for;
+	if done then
+	    break;
+	end if;
+	dext:=dext+1;
+	ell:=ext<k|dext>;
+    end while;
+
+    start := Cputime();
+    numers := [ CRT_p([rem[i] : rem in lRem], lMod, dext) : i in [1..#lRem[1]] ];
+    if Verbose gt 0 then
+        print "Chinese Remainder:", Sprint(Cputime(start)) cat "s";
+    end if;
+    if Verbose gt 2 then
+        start := Cputime();
+        numers2 := [ CRT([rem[i] : rem in lRem], lMod) : i in [1..#lRem[1]] ];
+        print "Build-in Chinese Remainder:", Sprint(Cputime(start)) cat "s";
+        print numers eq numers2;
+    end if;
+
+    return numers, denom;
+end function;
+
+
+
+/*----------------------------------------------------------*/
+/* returns the p-curvature of diffop (fast algorithm)       */
+/*----------------------------------------------------------*/
+function p_curvature_fast(diffop : Verbose := 0, Store := "", Newton:=false)
+    C, denom := remainder_dp(diffop : Verbose := Verbose, Store := Store, Newton:=Newton);
+    r := #diffop - 1;
+    lc := diffop[#diffop];
+    lc_der := Derivative(lc);
+    pow := Degree(denom)/Degree(lc);
+    pcurv := [ C ];
+    time for j in [2..r] do
+        coeffs := [ Derivative(pcurv[j-1][1])*lc - pow*lc_der*pcurv[j-1][1] - pcurv[j-1][r]*diffop[1] ];
+        for i in [2..r] do
+            Append(~coeffs, (Derivative(pcurv[j-1][i]) + pcurv[j-1][i-1])*lc - pow*lc_der*pcurv[j-1][i] - pcurv[j-1][r]*diffop[i]);
+        end for;
+        Append(~pcurv, coeffs);
+        pow := pow + 1;
+    end for;
+    pcurv := Matrix(r, r, [ [ pcurv[i][j]*lc^(r-i) : i in [1..r] ] : j in [1..r] ]);
+    return pcurv, lc^(Integers()!pow);
+end function;
+
+/*----------------------------------------------------------*/
+/* returns a matrix (with coefficients in k) which is       */
+/* similar to the p-curvature of diffop modulo (x-v)^p      */
+/*----------------------------------------------------------*/
+function p_curvature_local(diffop, v : Verbose := 0)
+    U := Universe(diffop);
+    x := U.1;
+    p := Characteristic(U);
+    r := #diffop - 1;
+    d:=Max([Degree(x) : x in diffop]);
+
+    if Verbose gt 0 then
+        print "p =", p;
+        print "d =", d;
+        print "r =", #diffop-1;
+        print "v =", v;
+    end if;
+
+    diffop_dp := to_dp([Evaluate(pol, x+v) : pol in diffop]);
+    recu_dp := diffeq_dp_to_rec(diffop_dp);
+    basis_dp := solutions_rec_dp(recu_dp, r, p+r : Verbose := Verbose);
+
+    pcurv_local := Matrix(r, r, [ [ Coefficient(basis_dp[j], p+i) : i in [0..r-1] ] : j in [1..r] ]);
+    return pcurv_local;
+end function;
